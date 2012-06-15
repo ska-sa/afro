@@ -1,0 +1,57 @@
+#NO WHITESPACE BETWEEN TEXT DELIMITERS!
+#This is a sample config file for KAT7 lab system in South Africa with 8 dual-pol antennas on 16 ROACH boards all plugged into 10GbE switch with 10GbE output.
+#Some fields will be automatically overwritten when corr_init is run.
+
+[katcp]
+#List of servers to be used for F/X engines. Comma separated list with no whitespace.
+server = roach030268
+#This is the control port to use when communicating with BORPH. By default, ROACHes use 7147.
+katcp_port = 7147
+#bitstream to load the FPGAs. Should be present and load-able by ROACH's KATCP server - corr will not do this for you.
+bitstream = r_10gbe_spead_stream_2012_Jan_20_0939.bof
+
+[fpga]
+#type of ADC. katadc or iadc.
+adc_type = katadc
+#Clockrate of ADCs in Hz.
+adc_clk = 800000000
+#Mixing freqency as a fraction of the sampling frequency eg, 0.25. Set to zero if no DDC is present.
+ddc_mix_freq = 0
+#Frequency decimation of the DDC block
+ddc_decimation = 1
+#IP address to use for FPGA core
+10gbe_ip = 10.0.0.128
+#UDP data port to use for 10GbE cores.
+10gbe_port = 8888
+#Number of accumulations used during ADC amplitude averaging.
+adc_levels_acc_len = 65536
+#Number of bits used in the F engine for timekeeping (the master counter)
+mcnt_bits = 48
+#number of bits used in the packet header for timestamping
+pcnt_bits = 48
+# the number of 1PPS pulses that we expect to elapse between arming the system and actually triggering. This is usually 2, to allow any sync pulses in the pipeline to flush before resyncing.
+sync_delay=2
+#how many analogue inputs on this board?
+n_inputs=2
+#how many output 10GbE ports are there?
+n_10gbe_ports=1
+
+[receiver]
+#spead flavour. string in the form XX,YY. Default: 64,40. consult the SPEAD documentation for details. Only 64-40 tested.
+spead_flavour=64,40
+#UDP receiver for output data
+rx_udp_ip = 10.0.0.2
+rx_udp_port = 9999
+rx_meta_ip = 127.0.0.1
+#Output packet payload length in bytes. Does not include SPEAD options fields.
+rx_pkt_payload_len = 4096
+default_spead_id=13056
+
+[equalisation]
+#digital gain compensation/correction
+eq_gain_0=8
+eq_gain_1=8
+#rf_gain sets the analogue attenuators on the ADCs. Acceptible range on KATADCs is -11 to +22 in  0.5dB steps. 
+rf_gain_0=4
+rf_gain_1=4
+

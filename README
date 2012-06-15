@@ -1,0 +1,16 @@
+raw spead stream
+
+This package provides functions to configure and control an Astronomically Fast Raw Output SPEAD streamer hardware device.
+
+Installation:
+Do the normal
+    sudo python setup.py install
+
+Usage:
+
+to be written
+
+Requires:
+    - iniparse, numpy, katcp, PySPEAD, construct, corr
+
+

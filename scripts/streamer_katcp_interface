@@ -1,0 +1,335 @@
+#!/usr/bin/env python
+""" This script is provides a KATCP interface for controlling an Astronomically Fast Raw Output SPEAD streamer.
+Author: Jason Manley
+Date: 2012-06-15"""
+
+import logging,corr,sys,Queue,katcp
+from optparse import OptionParser
+from katcp.kattypes import request, return_reply, Float, Int, Str, Bool
+import struct
+import afro
+
+logging.basicConfig(level=logging.WARN,
+                    stream=sys.stderr,
+                    format="%(asctime)s - %(name)s - %(filename)s:%(lineno)s - %(levelname)s - %(message)s")
+
+class DeviceExampleServer(katcp.DeviceServer):
+
+    ## Interface version information.
+    VERSION_INFO = ("Python RAW SPEAD STREAMER server", 0, 1)
+
+    ## Device server build / instance information.
+    BUILD_INFO = ("afro", 0, 1, "rc2")
+
+    #pylint: disable-msg=R0904
+    def setup_sensors(self):
+        pass
+
+    def __init__(self, *args, **kwargs):
+        super(DeviceExampleServer, self).__init__(*args, **kwargs)
+        self.r = None
+
+    @request(Str(default='/etc/afro/default'), Int(default=100))
+    @return_reply()
+    def request_connect(self, sock, config_file, log_len):
+        """Connect to the ROACH board. Please specify the config file and the log length. Clears any existing log. Call this again if you make external changes to the config file to reload it."""
+        self.lh = corr.log_handlers.DebugLogHandler(log_len)
+        self.r = afro.cam.Streamer(config_file=config_file,log_handler=self.lh,log_level=logging.INFO)
+        return ("ok",)
+
+    @request(include_msg=True)
+    @return_reply(Int(min=0))
+    def request_get_rcs(self, sock,orgmsg):
+        """Get the revision control information for the system."""
+        if self.r is None:
+            return katcp.Message.reply("fail","... you haven't connected yet!")
+        rcs=self.r.get_rcs()
+        ret_line=[]
+        for e,r in rcs.iteritems():
+            for k,s in r.iteritems():
+                ret_line.append('%s:%s:%s'%(e,k,s))
+                self.reply_inform(sock, katcp.Message.inform(orgmsg.name,ret_line[-1]),orgmsg)
+        return ("ok",len(ret_line))
+
+
+    @request(Int(default=0x3300))
+    @return_reply()
+    def request_initialise(self, sock, spead_id):
+        """Initialise the streamer. This programs the FPGAs, configures network interfaces etc. Includes error checks. Consult the log in event of errors. You optionally pass a SPEAD stream ID, which obviously needs to be different for each stream  if you're simultaneously streaming multiple ADCs' data to a single capture port."""
+        if self.r is None:
+            return ("fail","... you haven't connected yet!")
+        try: 
+            self.r.initialise(spead_id=spead_id)
+            return ("ok",)
+        except:
+            return ("fail","Something broke. Check the log.")
+
+    @request(include_msg=True)
+    @return_reply(Int(min=0))
+    def request_get_log(self, sock, orgmsg):
+        """Fetch the log."""
+        if self.r is None:
+            return ("fail","... you haven't connected yet!")
+
+        print "\nlog:"
+        self.lh.printMessages()
+
+        for logent in self.r.log_handler._records:
+            if logent.exc_info:
+                print '%s: %s Exception: '%(logent.name,logent.msg),logent.exc_info[0:-1]
+                self.reply_inform(sock, katcp.Message.inform("log",'%s: %s Exception: '%(logent.name,logent.msg),logent.exc_info[0:-1]),orgmsg)        
+            else:
+#log error 1234567 basic "the error string"
+                self.reply_inform(sock, katcp.Message.inform("log", logent.levelname.lower() if logent.levelname.lower() != 'warning' else 'warn', '%i'%(logent.created*1000), logent.name ,logent.msg),orgmsg)
+                #print 'Sending this message:',logent.msg
+        return ("ok", len(self.r.log_handler._records))
+
+    @request()
+    @return_reply()
+    def request_clr_log(self, sock):
+        """Clears the log."""
+        if self.r is None:
+            return ("fail","... you haven't connected yet!")
+        self.r.log_handler.clear()
+        return ("ok",)
+    
+    @request(Int(),Str())
+    @return_reply(Str())
+    def request_label_input(self, sock, input_n, ant_str):
+        """Label the inputs. First argument is integer specifying the physical connection. Ordering: first input of first feng, second input of first feng, ... , first input of second feng, second input of second feng, ... , second-last input of last feng, last input of last feng."""
+        if self.r is None:
+            return ("fail","... you haven't connected yet!")
+        if (input_n < self.r.config['n_inputs']):
+            self.r.label_input(input_n,ant_str)
+            return("ok","Input %i relabelled to %s."%(input_n,ant_str))
+        else:
+            #return("fail","it broke.")
+            return("fail","Sorry, your input number is invalid. Valid range: 0 to %i."%(self.r.config['n_inputs']-1))
+           
+
+    @return_reply(Str(),Str())
+    def request_tx_start(self, sock, orgmsg):
+        """Start transmission to the given IP address and port, or use the defaults from the config file if not specified. The first argument should be the IP address in dotted-quad notation. The second is the port."""
+        if self.r is None:
+            return ("fail","... you haven't connected yet!")
+        try:
+            if len(orgmsg.arguments)>1:
+                dest_port=int(orgmsg.arguments[1])
+            else:
+                dest_port=None
+            if len(orgmsg.arguments)>1:
+                dest_ip_str=orgmsg.arguments[0]
+            else:
+                dest_ip_str=None
+            self.r.config_udp_output(dest_ip_str=dest_ip_str,dest_port=dest_port)
+            self.r.spead_issue_all()
+            self.r.tx_start()
+            return ("ok",
+            "data %s:%i"%(self.r.config['rx_udp_ip_str'],self.r.config['rx_udp_port']),
+            "meta %s:%i"%(self.r.config['rx_meta_ip_str'],self.r.config['rx_udp_port'])
+            )   
+        except:
+            return ("fail","Something broke. Check the log.")
+      
+    @request()
+    @return_reply(Str())
+    def request_spead_issue(self, sock):
+        """Issue the SPEAD metadata so that the receiver can interpret the data stream."""
+        if self.r is None:
+            return ("fail","... you haven't connected yet!")
+        try:
+            self.r.spead_issue_all()
+            return ("ok",
+            "metadata sent to %s:%i"%(self.r.config['rx_meta_ip_str'],self.r.config['rx_udp_port'])
+            )
+        except:
+            return ("fail","Something broke. Check the log.")
+            
+    @request()
+    @return_reply()
+    def request_tx_stop(self, sock):
+        """Stop transmission to the IP given in the config file."""
+        if self.r is None:
+            return ("fail","... you haven't connected yet!")
+        try:
+            self.r.tx_stop()
+            return ("ok",)
+        except:
+            return ("fail","Something broke. Check the log.")
+            
+    @request()
+    @return_reply(Str())
+    def request_tx_status(self, sock):
+        """Check the TX status. Returns enabled or disabled."""
+        if self.r is None:
+            return ("fail","... you haven't connected yet!")
+        try:
+            if self.r.tx_status_get(): return("ok","enabled")
+            else: return("ok","disabled")
+        except:
+            return ("fail","Couldn't complete the request. Something broke. Check the log.")
+            
+    @request(include_msg=True)
+    def request_check_sys(self, sock, orgmsg):
+        """Checks system health. Returns health tree informs for each engine in the system."""
+        if self.r is None:
+            return katcp.Message.reply(orgmsg.name,"fail","... you haven't connected yet!")
+        try:
+            stat=self.r.check_all(details=True)
+            for l,v in stat.iteritems():
+                ret_line=[]
+                for k,s in v.iteritems():
+                    ret_line.append('%s:%s'%(k,s)) 
+                self.reply_inform(sock, katcp.Message.inform(orgmsg.name,str(l),*ret_line),orgmsg)
+            return katcp.Message.reply(orgmsg.name,"ok",len(stat))
+        except:
+            return katcp.Message.reply(orgmsg.name,"fail","Something broke spectacularly and the check didn't complete. Scrutinise the log.")
+            
+    @request()
+    @return_reply(Int(min=0))
+    def request_resync(self, sock):
+        """Rearms the system. Returns the time at which the system was synch'd in ms since unix epoch."""
+        if self.r is None:
+            return ("fail","... you haven't connected yet!")
+        try:
+            time=self.r.arm()
+            return ("ok",(time*1000))
+        except:
+            return ("fail",-1)
+
+    def request_get_adc_snapshots(self, sock, orgmsg):
+        """Grabs a snapshot of data from the specified antennas. 
+            \n@Param integer Sync to 1PPS (ie align all snapshots). Note that this could cost a bit of time as we wait for the next 1PPS. 
+            \n@Param integer Wait for ADC level of trigger_level to capture transients.
+            \n@Params list of antenna strings.
+            \n@reply str antenna name.
+            \n@reply int timestamp (unix seconds since epoch) of first sample.
+            \n@reply int n_samples captured since trigger."""
+
+        if self.r is None:
+            return katcp.Message.reply(orgmsg.name,"fail","... you haven't connected yet!")
+        if len(orgmsg.arguments)<3: 
+            return katcp.Message.reply(orgmsg.name,"fail","... you didn't specify enough arguments.")
+        try:
+            sync_to_pps=bool(int(orgmsg.arguments[0]))
+            trig_level=int(orgmsg.arguments[1])
+            ant_strs=orgmsg.arguments[2:]
+            for ant_str in ant_strs:
+                if not ant_str in self.r.config._get_ant_mapping_list(): 
+                    return katcp.Message.reply(orgmsg.name,"fail","Antenna not found. Valid entries are %s."%str(self.r.config._get_ant_mapping_list()))
+            snap_data=self.r.get_adc_snapshots(ant_strs,trig_level=trig_level,sync_to_pps=sync_to_pps)
+            for ant_str,data in snap_data.iteritems():
+                self.reply_inform(sock,katcp.Message.inform(orgmsg.name,ant_str,str(data['timestamp']*1000),str(data['offset']),*data['data']),orgmsg)
+            return katcp.Message.reply(orgmsg.name,'ok',str(len(snap_data)))
+        except:
+            return katcp.Message.reply(orgmsg.name,"fail","something broke. sorry.")
+             
+    @request(Str(),include_msg=True)
+    def request_get_adc_snapshot(self, sock, orgmsg, ant_str):
+        """Grabs a snapshot of data from the antenna specified."""
+        if self.r is None:
+            return katcp.Message.reply(orgmsg.name,"fail","... you haven't connected yet!")
+        try:
+            if not ant_str in self.r.config._get_ant_mapping_list(): 
+                return katcp.Message.reply(orgmsg.name,"fail","Antenna not found. Valid entries are %s."%str(self.r.config._get_ant_mapping_list()))
+            unpackedBytes=self.r.get_adc_snapshots([ant_str])[ant_str]['data']
+            return katcp.Message.reply(orgmsg.name,'ok',*unpackedBytes)
+            #return katcp.Message.reply(orgmsg.name,'ok','Awaiting rewrite!')
+        except:
+            return katcp.Message.reply(orgmsg.name,'fail',"something broke. oops.")
+           
+    @request(include_msg=True)
+    @return_reply(Int())
+    def request_get_input_levs(self, sock, orgmsg):
+        """Get the current RF input levels to the DBE in dBm."""
+        if self.r is None:
+            return ("fail","... you haven't connected yet!")
+        amps=self.r.adc_amplitudes_get()
+        for ant_str,ampl in amps.iteritems():
+#            rf_level=amps[i]['rms_dbm'] - self.r.rf_status_get(i)[1] 
+            if self.r.status_get(ant_str)['adc_disabled']==True:
+                stat = 'disabled'
+            elif ampl['low_level_warn']==True:
+                stat = 'low'
+            elif ampl['high_level_warn']==True:
+                stat = 'high'
+            else:
+                stat = 'ok'
+            self.reply_inform(sock, katcp.Message.inform(orgmsg.name,ant_str,"%2.2f"%ampl['input_rms_dbm'],stat),orgmsg)
+        return ("ok", len(amps))
+        
+    @request(include_msg=True)
+    @return_reply(Int())
+    def request_get_ant_status(self, sock, orgmsg):
+        """Decode and report the status of all connected F engines. This will automatically clear the registers after the readback."""
+        if self.r is None:
+            return ("fail","... you haven't connected yet!")
+        fstat = self.r.feng_status_get_all()
+        self.r.rst_fstatus()
+        for i in fstat:
+            out_str=[]
+            for ent in fstat[i]: 
+                out_str.append(str(ent))
+                out_str.append(str(fstat[i][ent]))
+            self.reply_inform(sock, katcp.Message.inform(orgmsg.name,i,*out_str),orgmsg)
+        return ("ok", len(fstat))
+        
+    @request(Str(),include_msg=True)
+    def request_eq_gain_get(self, sock, orgmsg, ant_str):
+        """Get the current digital gain configuration. Only valid for dual-input mode."""
+        if self.r is None:
+            return katcp.Message.reply(orgmsg.name,"fail","... you haven't connected yet!")
+        if not ant_str in self.r.config._get_ant_mapping_list():
+            return katcp.Message.reply(orgmsg.name,"fail","Antenna not found. Valid entries are %s."%str(self.r.config._get_ant_mapping_list()))
+        eq=self.r.eq_spectrum_get(ant_str)
+        return katcp.Message.reply(orgmsg.name,'ok',eq)
+        
+    def request_eq_set(self, sock, orgmsg):
+        """Set the current digital gain configuration for a given antenna. Only valid for dual-input mode. ?eq-set 0x 80."""
+        if self.r is None:
+            return katcp.Message.reply(orgmsg.name,"fail","... you haven't connected yet!")
+        ant_str=orgmsg.arguments[0]
+        if not ant_str in self.r.config._get_ant_mapping_list(): 
+            return katcp.Message.reply(orgmsg.name,"fail","Antenna not found. Valid entries are %s."%str(self.r.config._get_ant_mapping_list()))
+
+        if len(orgmsg.arguments) == 2: #+1 to account for antenna label, assume single number across entire band
+            self.r.eq_gain_set(ant_str,eq_gain=int(orgmsg.arguments[1]))
+            return katcp.Message.reply(orgmsg.name,'ok',"Set gain to %i."%int(orgmsg.arguments[1]))
+        else:
+            return katcp.Message.reply(orgmsg.name,'error', 'Please specify the desired gain.')
+
+if __name__ == "__main__":
+
+    usage = "usage: %prog [options]"
+    parser = OptionParser(usage=usage)
+    parser.add_option('-a', '--host', dest='host', type="string", default="", metavar='HOST',
+                      help='listen to HOST (default="" - all hosts)')
+    parser.add_option('-p', '--port', dest='port', type=long, default=1236, metavar='N',
+                      help='attach to port N (default=1236)')
+    (opts, args) = parser.parse_args()
+
+    print "Server listening on port %d, Ctrl-C to terminate server" % opts.port
+    restart_queue = Queue.Queue()
+    server = DeviceExampleServer(opts.host, opts.port)
+    server.set_restart_queue(restart_queue)
+
+    server.start()
+    print "Started."
+
+    try:
+        while True:
+            try:
+                device = restart_queue.get(timeout=0.5)
+            except Queue.Empty:
+                device = None
+            if device is not None:
+                print "Stopping ..."
+                device.stop()
+                device.join()
+                print "Restarting ..."
+                device.start()
+                print "Started."
+    except KeyboardInterrupt:
+        print "Shutting down ..."
+        server.stop()
+        server.join()
