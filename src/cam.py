@@ -12,7 +12,7 @@ Revisions:
 import corr, time, sys, numpy, os, logging, katcp, struct, construct, socket, afro
 
 DEFAULT_CONFIG='/etc/afro/default'
-spead_time_id=0x1600
+spead_time_id=0x801600
 
 register_status = construct.BitStruct('status0',
     construct.Padding(32 - 29 - 1),     # 30 - 31
